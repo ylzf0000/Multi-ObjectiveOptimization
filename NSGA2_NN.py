@@ -3,12 +3,17 @@ import math
 import random
 import matplotlib.pyplot as plt
 import numpy as np
+from TestFunction import *
+from Net import *
+import torch
 
 
 # 默认为最小化问题
 
-def recombination(a, b):
-    return (a + b) / 2
+def nn_recombination(a, b, c, net, bounds):
+    x = np.array((a, b, c)).reshape((3 * len(a)))
+    x = torch.from_numpy(x)
+    return net(x).numpy() * (bounds[:][1] - bounds[:][0])
 
 
 def clamp(a, l, r):
@@ -107,14 +112,6 @@ def get_front_vals(front, pop, num_objs, objs):
             front_vals[i][oi] = objs[oi](pop[front[i]])
     return front_vals
 
-def get_front_kvs(front, pop, num_objs, objs):
-    front_vals = np.empty((len(front), num_objs))
-    front_keys = np.empty((len(front), 2))
-    for i in range(len(front)):
-        front_keys[i] = pop[front[i]]
-        for oi in range(num_objs):
-            front_vals[i][oi] = objs[oi](front_keys[i])
-    return front_keys, front_vals
 
 def get_obj_vals(pop, objs):
     pop_size, num_objs = pop.shape[0], len(objs)
@@ -126,7 +123,6 @@ def get_obj_vals(pop, objs):
 
 
 def show_scatter(front_vals):
-    plt.clf()
     f1 = [val[0] for val in front_vals]
     f2 = [val[1] for val in front_vals]
     plt.xlabel('F1', fontsize=15)
@@ -137,7 +133,7 @@ def show_scatter(front_vals):
     plt.show()
 
 
-def main_loop(max_gen, pop_size, num_objs, objs, dim, bounds, constraint, mutation_rate):
+def main_loop(max_gen, pop_size, num_objs, objs, dim, bounds, constraint, mutation_rate, net):
     """
     :param max_gen: 种群最大代数
     :param pop_size: 种群大小
@@ -150,7 +146,7 @@ def main_loop(max_gen, pop_size, num_objs, objs, dim, bounds, constraint, mutati
     :return:
     """
     # 初始化种群
-    front_vals = None
+    # front_vals = None
     pop = np.empty((pop_size, dim), dtype=np.float32)
     for i in range(pop_size):
         p = [bounds[j][0] + (bounds[j][1] - bounds[j][0]) * random.random()
@@ -168,19 +164,37 @@ def main_loop(max_gen, pop_size, num_objs, objs, dim, bounds, constraint, mutati
         for i in range(pop_size, pop_size * 2):
             ai = random.randint(0, pop_size - 1)
             bi = random.randint(0, pop_size - 1)
-            # ci = random.randint(0, pop_size - 1)
-            mix_pop[i] = recombination(pop[ai], pop[bi])
-            if random.random() < mutation_rate:
-                mix_pop[i] = mutation(mix_pop[i], bounds)
-            while not sat_constraint(mix_pop[i], constraint):
-                mix_pop[i] = recombination(pop[ai], pop[bi])
+            ci = random.randint(0, pop_size - 1)
+            if num_gen == 0:
+                mix_pop[i] = recombination(pop[ai], pop[bi], pop[ci], net, bounds)
                 if random.random() < mutation_rate:
                     mix_pop[i] = mutation(mix_pop[i], bounds)
+                while not sat_constraint(mix_pop[i], constraint):
+                    mix_pop[i] = recombination(pop[ai], pop[bi], pop[ci], net, bounds)
+                    if random.random() < mutation_rate:
+                        mix_pop[i] = mutation(mix_pop[i], bounds)
+            else:
+                mix_pop[i] = nn_recombination(pop[ai], pop[bi], pop[ci], net, bounds)
+                while not sat_constraint(mix_pop[i], constraint):
+                    mix_pop[i] = nn_recombination(pop[ai], pop[bi], pop[ci], net, bounds)
+            mix_pop[i] = nn_recombination(pop[ai], pop[bi], pop[ci], net, bounds)
+            while not sat_constraint(mix_pop[i], constraint):
+                mix_pop[i] = nn_recombination(pop[ai], pop[bi], pop[ci], net, bounds)
         # 为当前种群个体生成目标函数值
         obj_vals = get_obj_vals(mix_pop, objs)
         next_pop = []
         # 快速非支配排序
         fronts = non_dominated_sort(mix_pop, obj_vals)
+        # 使用第一个最优层数据更新网络
+        front0ids = [i for i in fronts[0]]
+        labels = []
+        for i in range(len(front0ids)):
+            label = []
+            for j in range(num_objs):
+                label.append(obj_vals[i][j])
+            labels.append(label)
+        inputs = [mix_pop[i] for i in fronts[0]]
+        train(net, 10, inputs, labels)
         dist = crowding_distance(mix_pop, fronts, obj_vals)
         for f in fronts:
             size_next_pop = len(next_pop)
@@ -200,23 +214,25 @@ def main_loop(max_gen, pop_size, num_objs, objs, dim, bounds, constraint, mutati
         print(f'num_gen: {num_gen}')
         num_gen += 1
     # 返回第1个面的目标函数值
-    # front_vals = get_front_vals(non_dominated_sort(pop, get_obj_vals(pop, objs))[0], pop, num_objs, objs)
-    #
-    # return front_vals
-    k, v = get_front_kvs(non_dominated_sort(pop, get_obj_vals(pop, objs))[0], pop, num_objs, objs)
-    return k, v
+    front_vals = get_front_vals(non_dominated_sort(pop, get_obj_vals(pop, objs))[0], pop, num_objs, objs)
+
+    return front_vals
 
 
 if __name__ == '__main__':
-    max_gen = 50
+    max_gen = 20
     pop_size = 100
-    from TestFunction import *
-
-    using_function = BinhAndKornfunction
+    using_function = SchafferfunctionN
     objs = using_function.objs
     constraints = using_function.constraints
     bounds = using_function.bounds
     mutation_rate = 0.1
-    k,v = main_loop(max_gen, pop_size, len(objs), objs, len(bounds), bounds, constraints, mutation_rate)
-    show_scatter(k)
-    show_scatter(v)
+
+    net = Net(x_dim=len(bounds))
+
+    front_vals = main_loop(max_gen, pop_size,
+                           len(objs), objs,
+                           len(bounds), bounds,
+                           constraints, mutation_rate,
+                           net)
+    show_scatter(front_vals)
